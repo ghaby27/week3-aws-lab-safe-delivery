@@ -6,7 +6,7 @@
 set -euo pipefail
 export AWS_PROFILE=${AWS_PROFILE:-onward-logistics} AWS_REGION=${AWS_REGION:-eu-west-1}
 REPO=onward-dev-delivery-orders
-APP_REPO=${APP_REPO:-$(git rev-parse --show-toplevel)/../aws-dev-associate-lab-app}
+APP_REPO=${APP_REPO:-$(cd "$(dirname "$0")/../.." && pwd)/../aws-dev-associate-lab-app}
 
 has_image() { aws ecr describe-images --repository-name $REPO --image-ids imageTag=latest >/dev/null 2>&1; }
 
