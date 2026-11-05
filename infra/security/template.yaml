@@ -10,10 +10,13 @@ Parameters:
     Type: String
     AllowedValues: [dev, test, prod]
     Default: dev
-  AppRepository:
+  AppRepositorySubject:
     Type: String
-    Default: ghaby27/aws-dev-associate-lab-app
-    Description: GitHub owner/repo allowed to push images (OIDC subject).
+    Default: ghaby27@332540436/aws-dev-associate-lab-app@1445229473
+    Description: >-
+      The app repository as GitHub writes it in the OIDC token subject: owner@owner-id/repo@repo-id.
+      The numeric IDs never change, so a deleted and re-created repository with the same name
+      cannot assume the role.
   ConnectionArn:
     Type: String
     Description: CodeConnections connection the pipeline reads the app repo's deploy files through.
@@ -119,8 +122,8 @@ Resources:
               # Only the main branch, or a build-* tag pushed by the deploy hook.
               StringLike:
                 token.actions.githubusercontent.com:sub:
-                  - !Sub "repo:${AppRepository}:ref:refs/heads/main"
-                  - !Sub "repo:${AppRepository}:ref:refs/tags/build-*"
+                  - !Sub "repo:${AppRepositorySubject}:ref:refs/heads/main"
+                  - !Sub "repo:${AppRepositorySubject}:ref:refs/tags/build-*"
       ManagedPolicyArns: [!Ref GitHubPushPolicy]
 
   # ---------------------------------------------------------------------------
