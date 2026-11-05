@@ -1,0 +1,9 @@
+# Deployed by CloudFormation Git sync to stack onward-dev-delivery-service.
+template-file-path: infra/service/template.yaml
+parameters:
+  Environment: dev
+  OwnerName: Gabriel Anyaele
+tags:
+  Project: onward
+  Owner: Gabriel Anyaele
+  Environment: dev

@@ -1,0 +1,208 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Service layer for the safe delivery lab: the internet-facing Application Load
+  Balancer (the single public entry point), the blue and green target groups
+  CodeDeploy switches between, and the ECS Fargate service running the order
+  app in the private subnets of two Availability Zones, scaling from 2 to 4 tasks
+  on average CPU. Releases are done by CodeDeploy (pipeline layer), not by this
+  stack: after the first deploy, the running task definition belongs to CodeDeploy.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+  OwnerName:
+    Type: String
+    Description: Shown on the page.
+  LabName:
+    Type: String
+    Default: Delivering Order System Updates Safely for Onward Logistics
+  MinTasks:
+    Type: Number
+    Default: 2
+    Description: One task per Availability Zone, so a zone loss leaves one serving.
+  MaxTasks:
+    Type: Number
+    Default: 4
+  CpuTargetPercent:
+    Type: Number
+    Default: 50
+  AppPort:
+    Type: Number
+    Default: 8080
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Load balancer: the only public resource
+  # ---------------------------------------------------------------------------
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "onward-${Environment}-delivery-alb"
+      Type: application
+      Scheme: internet-facing
+      Subnets: !Split [",", !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-public-subnet-ids" }]
+      SecurityGroups:
+        - !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-alb-sg-id" }
+
+  # Two identical target groups: one serves customers (blue), the other receives the
+  # new version during a release (green). CodeDeploy swaps them on each release.
+  BlueTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "onward-${Environment}-delivery-blue"
+      VpcId: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-vpc-id" }
+      TargetType: ip
+      Protocol: HTTP
+      Port: !Ref AppPort
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 5
+      HealthCheckTimeoutSeconds: 3
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "30" }
+
+  GreenTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "onward-${Environment}-delivery-green"
+      VpcId: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-vpc-id" }
+      TargetType: ip
+      Protocol: HTTP
+      Port: !Ref AppPort
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 5
+      HealthCheckTimeoutSeconds: 3
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "30" }
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref BlueTargetGroup
+
+  # ---------------------------------------------------------------------------
+  # ECS: cluster, first task definition, service
+  # ---------------------------------------------------------------------------
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/onward/${Environment}/delivery/orders"
+      RetentionInDays: 7
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "onward-${Environment}-delivery"
+
+  # The first version only. Every later release registers a new revision from the app
+  # repository's deploy/taskdef.json (keep the two in step).
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "onward-${Environment}-delivery-orders"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Cpu: "256"
+      Memory: "512"
+      RuntimePlatform: { OperatingSystemFamily: LINUX, CpuArchitecture: X86_64 }
+      ExecutionRoleArn: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-task-execution-role-arn" }
+      ContainerDefinitions:
+        - Name: orders
+          Image: !Sub
+            - "${Uri}:latest"
+            - Uri: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-repository-uri" }
+          Essential: true
+          PortMappings: [{ ContainerPort: !Ref AppPort, Protocol: tcp }]
+          Environment:
+            - { Name: OWNER_NAME, Value: !Ref OwnerName }
+            - { Name: LAB_NAME, Value: !Ref LabName }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: orders
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      ServiceName: !Sub "onward-${Environment}-delivery-orders"
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      DesiredCount: !Ref MinTasks
+      DeploymentController: { Type: CODE_DEPLOY }
+      HealthCheckGracePeriodSeconds: 30
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Split [",", !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-private-subnet-ids" }]
+          SecurityGroups:
+            - !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-task-sg-id" }
+      LoadBalancers:
+        - ContainerName: orders
+          ContainerPort: !Ref AppPort
+          TargetGroupArn: !Ref BlueTargetGroup
+      EnableECSManagedTags: true
+      PropagateTags: SERVICE
+
+  # ---------------------------------------------------------------------------
+  # Scaling: keep average CPU near the target, between 2 and 4 tasks
+  # ---------------------------------------------------------------------------
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub "service/${Cluster}/${Service.Name}"
+      MinCapacity: !Ref MinTasks
+      MaxCapacity: !Ref MaxTasks
+
+  CpuScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "onward-${Environment}-delivery-cpu"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: !Ref CpuTargetPercent
+        ScaleOutCooldown: 60
+        ScaleInCooldown: 120
+
+Outputs:
+  AppUrl:
+    Description: The single public address of the order system.
+    Value: !Sub "http://${LoadBalancer.DNSName}"
+  ClusterName:
+    Value: !Ref Cluster
+    Export: { Name: !Sub "onward-${Environment}-delivery-cluster-name" }
+  ServiceName:
+    Value: !GetAtt Service.Name
+    Export: { Name: !Sub "onward-${Environment}-delivery-service-name" }
+  ListenerArn:
+    Value: !Ref Listener
+    Export: { Name: !Sub "onward-${Environment}-delivery-listener-arn" }
+  BlueTargetGroupName:
+    Value: !GetAtt BlueTargetGroup.TargetGroupName
+    Export: { Name: !Sub "onward-${Environment}-delivery-blue-tg-name" }
+  GreenTargetGroupName:
+    Value: !GetAtt GreenTargetGroup.TargetGroupName
+    Export: { Name: !Sub "onward-${Environment}-delivery-green-tg-name" }
+  LoadBalancerFullName:
+    Value: !GetAtt LoadBalancer.LoadBalancerFullName
+    Export: { Name: !Sub "onward-${Environment}-delivery-alb-full-name" }

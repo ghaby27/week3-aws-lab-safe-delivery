@@ -1,0 +1,187 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Pipeline layer for the safe delivery lab. A new "latest" image in ECR raises an
+  event; an EventBridge rule starts CodePipeline; the pipeline takes the image and
+  the app repository's deploy/ files and hands them to CodeDeploy, which releases
+  the new version blue/green: start it beside the old one, move traffic once it is
+  healthy, keep the old version 15 minutes for a fast rollback, and roll back on
+  its own if the release fails or the error alarm fires.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+  ConnectionArn:
+    Type: String
+    Description: CodeConnections connection used to read the app repository's deploy/ files.
+  AppRepository:
+    Type: String
+    Default: ghaby27/aws-dev-associate-lab-app
+  AppBranch:
+    Type: String
+    Default: main
+  ReleaseTag:
+    Type: String
+    Default: latest
+    Description: Image tag whose push starts a release.
+  KeepOldVersionMinutes:
+    Type: Number
+    Default: 15
+    Description: How long the previous version stays running after traffic moves, for a fast rollback.
+
+Resources:
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "onward-${Environment}-delivery-artifacts-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      LifecycleConfiguration:
+        Rules: [{ Id: expire-old-artifacts, Status: Enabled, ExpirationInDays: 30 }]
+
+  # ---------------------------------------------------------------------------
+  # CodeDeploy: blue/green for the ECS service
+  # ---------------------------------------------------------------------------
+  # More than 5 server errors (5xx) from the app in a minute during a release rolls it back.
+  ErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "onward-${Environment}-delivery-5xx"
+      AlarmDescription: The order app is returning server errors; rolls back a release in progress.
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-alb-full-name" }
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  DeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Sub "onward-${Environment}-delivery-orders"
+      ComputePlatform: ECS
+
+  DeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref DeployApplication
+      DeploymentGroupName: !Sub "onward-${Environment}-delivery-orders"
+      ServiceRoleArn: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-codedeploy-role-arn" }
+      DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      BlueGreenDeploymentConfiguration:
+        DeploymentReadyOption:
+          ActionOnTimeout: CONTINUE_DEPLOYMENT
+          WaitTimeInMinutes: 0
+        TerminateBlueInstancesOnDeploymentSuccess:
+          Action: TERMINATE
+          TerminationWaitTimeInMinutes: !Ref KeepOldVersionMinutes
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events: [DEPLOYMENT_FAILURE, DEPLOYMENT_STOP_ON_ALARM, DEPLOYMENT_STOP_ON_REQUEST]
+      AlarmConfiguration:
+        Enabled: true
+        Alarms: [{ Name: !Ref ErrorAlarm }]
+      ECSServices:
+        - ClusterName: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-cluster-name" }
+          ServiceName: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-service-name" }
+      LoadBalancerInfo:
+        TargetGroupPairInfoList:
+          - TargetGroups:
+              - Name: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-blue-tg-name" }
+              - Name: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-green-tg-name" }
+            ProdTrafficRoute:
+              ListenerArns:
+                - !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-listener-arn" }
+
+  # ---------------------------------------------------------------------------
+  # CodePipeline: collect the release, hand it to CodeDeploy
+  # ---------------------------------------------------------------------------
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub "onward-${Environment}-delivery-orders"
+      PipelineType: V2
+      ExecutionMode: QUEUED
+      RoleArn: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-pipeline-role-arn" }
+      ArtifactStore: { Type: S3, Location: !Ref ArtifactBucket }
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Image
+              ActionTypeId: { Category: Source, Owner: AWS, Provider: ECR, Version: "1" }
+              Configuration:
+                RepositoryName: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-repository-name" }
+                ImageTag: !Ref ReleaseTag
+              OutputArtifacts: [{ Name: Image }]
+            # Read only when a release runs; changes to the app repo do not start the pipeline
+            # by themselves (the image push does, through EventBridge).
+            - Name: DeployFiles
+              ActionTypeId: { Category: Source, Owner: AWS, Provider: CodeStarSourceConnection, Version: "1" }
+              Configuration:
+                ConnectionArn: !Ref ConnectionArn
+                FullRepositoryId: !Ref AppRepository
+                BranchName: !Ref AppBranch
+                DetectChanges: false
+                OutputArtifactFormat: CODE_ZIP
+              OutputArtifacts: [{ Name: DeployFiles }]
+        - Name: Deploy
+          Actions:
+            - Name: BlueGreen
+              ActionTypeId: { Category: Deploy, Owner: AWS, Provider: CodeDeployToECS, Version: "1" }
+              Configuration:
+                ApplicationName: !Ref DeployApplication
+                DeploymentGroupName: !Ref DeploymentGroup
+                TaskDefinitionTemplateArtifact: DeployFiles
+                TaskDefinitionTemplatePath: deploy/taskdef.json
+                AppSpecTemplateArtifact: DeployFiles
+                AppSpecTemplatePath: deploy/appspec.yaml
+                Image1ArtifactName: Image
+                Image1ContainerName: IMAGE1_NAME
+              InputArtifacts: [{ Name: DeployFiles }, { Name: Image }]
+
+  # ---------------------------------------------------------------------------
+  # EventBridge: a successful push of the release tag starts the pipeline
+  # ---------------------------------------------------------------------------
+  ImagePushRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "onward-${Environment}-delivery-image-push"
+      Description: Start the order app pipeline when a new release image is pushed to ECR.
+      EventPattern:
+        source: [aws.ecr]
+        detail-type: [ECR Image Action]
+        detail:
+          action-type: [PUSH]
+          result: [SUCCESS]
+          repository-name:
+            - !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-repository-name" }
+          image-tag: [!Ref ReleaseTag]
+      Targets:
+        - Id: pipeline
+          Arn: !Sub "arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${Pipeline}"
+          RoleArn: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-events-role-arn" }
+
+Outputs:
+  PipelineName:
+    Value: !Ref Pipeline
+  PipelineUrl:
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${Pipeline}/view"
+  ArtifactBucketName:
+    Value: !Ref ArtifactBucket

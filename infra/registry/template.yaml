@@ -1,0 +1,40 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Registry layer for the safe delivery lab: the private ECR repository that
+  GitHub Actions pushes the order app image to. Pushing the "latest" tag is the
+  release trigger (see the pipeline layer).
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+
+Resources:
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "onward-${Environment}-delivery-orders"
+      # Mutable so "latest" can move; every image is also tagged with its commit SHA.
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration: { ScanOnPush: true }
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      EmptyOnDelete: true   # a teardown removes the images too
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [{
+              "rulePriority": 1,
+              "description": "Keep the last 10 images",
+              "selection": { "tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 10 },
+              "action": { "type": "expire" }
+            }]
+          }
+
+Outputs:
+  RepositoryName:
+    Value: !Ref Repository
+    Export: { Name: !Sub "onward-${Environment}-delivery-repository-name" }
+  RepositoryUri:
+    Value: !GetAtt Repository.RepositoryUri
+    Export: { Name: !Sub "onward-${Environment}-delivery-repository-uri" }
