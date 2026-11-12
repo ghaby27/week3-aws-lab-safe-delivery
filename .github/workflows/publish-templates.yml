@@ -1,0 +1,62 @@
+# Publishes the platform's nested stack templates, then hands the release to Git sync.
+#
+# CloudFormation reads nested templates from S3 only, and Git sync deploys straight from
+# this repository. So a change under infra/platform/stacks/ does not deploy by itself:
+#   1. this workflow uploads the templates to the template bucket, in a folder named after
+#      their content (the Git tree hash of infra/platform/stacks/), using OIDC (no keys);
+#   2. it writes that folder name to TemplatesVersion in infra/platform/deployment.yaml and
+#      commits it;
+#   3. Git sync sees the deployment file change and updates the root stack, which updates
+#      the nested stacks from the new templates.
+# Pushes made with the workflow's own token never start workflows, so step 2 cannot loop.
+name: publish-templates
+
+on:
+  push:
+    branches: [main]
+    paths: ["infra/platform/stacks/**"]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # OIDC token for AWS
+  contents: write   # commit the new TemplatesVersion
+
+concurrency:
+  group: publish-templates
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-west-1
+  AWS_ROLE_ARN: arn:aws:iam::448049788660:role/onward-dev-delivery-templates-publish
+  TEMPLATE_BUCKET: onward-dev-delivery-templates-448049788660
+  DEPLOYMENT_FILE: infra/platform/deployment.yaml
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Name the version after the templates' content
+        run: echo "VERSION=$(git rev-parse HEAD:infra/platform/stacks)" >> "$GITHUB_ENV"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload the nested templates
+        run: aws s3 cp infra/platform/stacks/ "s3://$TEMPLATE_BUCKET/$VERSION/" --recursive
+
+      - name: Point the root stack at them
+        run: |
+          if grep -q "^  TemplatesVersion: $VERSION$" "$DEPLOYMENT_FILE"; then
+            echo "Already on $VERSION"; exit 0
+          fi
+          sed -i "s/^  TemplatesVersion: .*/  TemplatesVersion: $VERSION/" "$DEPLOYMENT_FILE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "chore: deploy nested templates ${VERSION::7}" "$DEPLOYMENT_FILE"
+          git pull -q --rebase origin main
+          git push -q origin HEAD:main
+          echo "Committed TemplatesVersion $VERSION; Git sync deploys it next"
