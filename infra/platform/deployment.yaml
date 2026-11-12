@@ -7,7 +7,7 @@ parameters:
   Environment: dev
   OwnerName: Gabriel Anyaele
   ConnectionArn: arn:aws:codeconnections:eu-west-1:448049788660:connection/ec36b4c3-949e-47f7-95b0-4079a11b3703
-  TemplatesVersion: bc16dd2287aece309a89877d6a2bd1c5132b059a
+  TemplatesVersion: 60346ba45900abaaa2f0cfeeaa7f7cbc77274cad
 tags:
   Project: onward
   Owner: Gabriel Anyaele
