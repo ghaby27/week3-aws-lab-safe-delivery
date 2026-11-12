@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  Network stack (nested in the platform root) for the Onward Logistics order
+  Network stack, nested in the platform root, for the Onward Logistics order
   system, safe delivery lab: a VPC
   across two Availability Zones. Public subnets hold only the load balancer.
   Private subnets hold the containers and have NO route to the internet (no NAT,
