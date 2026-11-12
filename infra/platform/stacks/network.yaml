@@ -1,6 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  Network layer for the Onward Logistics order system (safe delivery lab): a VPC
+  Network stack (nested in the platform root) for the Onward Logistics order
+  system, safe delivery lab: a VPC
   across two Availability Zones. Public subnets hold only the load balancer.
   Private subnets hold the containers and have NO route to the internet (no NAT,
   no default route): the containers reach AWS services through VPC endpoints, so
@@ -176,13 +177,7 @@ Resources:
 Outputs:
   VpcId:
     Value: !Ref Vpc
-    Export: { Name: !Sub "onward-${Environment}-delivery-vpc-id" }
-  VpcCidr:
-    Value: !Ref VpcCidr
-    Export: { Name: !Sub "onward-${Environment}-delivery-vpc-cidr" }
   PublicSubnetIds:
     Value: !Join [",", [!Ref PublicSubnetA, !Ref PublicSubnetB]]
-    Export: { Name: !Sub "onward-${Environment}-delivery-public-subnet-ids" }
   PrivateSubnetIds:
     Value: !Join [",", [!Ref PrivateSubnetA, !Ref PrivateSubnetB]]
-    Export: { Name: !Sub "onward-${Environment}-delivery-private-subnet-ids" }

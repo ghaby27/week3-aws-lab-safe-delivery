@@ -7,7 +7,7 @@
 set -uo pipefail
 export AWS_PROFILE=${AWS_PROFILE:-onward-logistics} AWS_REGION=${AWS_REGION:-eu-west-1}
 MINUTES=${1:-8}; CLIENTS=${2:-20}
-URL=$(aws cloudformation describe-stacks --stack-name onward-dev-delivery-service \
+URL=$(aws cloudformation describe-stacks --stack-name onward-dev-delivery-platform \
   --query "Stacks[0].Outputs[?OutputKey=='AppUrl'].OutputValue" --output text)
 end=$(( $(date +%s) + MINUTES * 60 ))
 echo "Loading $URL with $CLIENTS clients x 10 parallel requests for $MINUTES minutes"

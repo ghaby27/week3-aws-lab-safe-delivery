@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Artifacts layer for the safe delivery lab, deployed before the platform: where
+  built things are stored, and the only identities allowed to store them.
+  - The private ECR repository GitHub Actions pushes the order app image to.
+    Pushing the "latest" tag is the release trigger (see the pipeline stack).
+  - The S3 bucket holding the platform's nested stack templates. CloudFormation
+    reads nested templates from S3 only, so the infra repository's workflow
+    publishes them here and Git sync deploys the root stack that points at them.
+  Both are written by GitHub Actions through OIDC: no stored credentials. This
+  stack is standalone (not nested) because the platform needs both to exist
+  first: the nested templates to deploy, and an image for the service to start.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+  AppRepositorySubject:
+    Type: String
+    Default: ghaby27@332540436/aws-dev-associate-lab-app@1445229473
+    Description: >-
+      The app repository as GitHub writes it in the OIDC token subject: owner@owner-id/repo@repo-id.
+      The numeric IDs never change, so a deleted and re-created repository with the same name
+      cannot assume the role.
+  InfraRepositorySubject:
+    Type: String
+    Default: ghaby27@332540436/week3-aws-lab-safe-delivery@1446624103
+    Description: This infrastructure repository, in the same form.
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Container images
+  # ---------------------------------------------------------------------------
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "onward-${Environment}-delivery-orders"
+      # Mutable so "latest" can move; every image is also tagged with its commit SHA.
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration: { ScanOnPush: true }
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      EmptyOnDelete: true   # a teardown removes the images too
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [{
+              "rulePriority": 1,
+              "description": "Keep the last 10 images",
+              "selection": { "tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 10 },
+              "action": { "type": "expire" }
+            }]
+          }
+
+  GitHubPushPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "onward-${Environment}-delivery-github-push"
+      Description: Push images to the order app ECR repository, nothing else.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EcrLogin
+            Effect: Allow
+            Action: ecr:GetAuthorizationToken
+            Resource: "*"
+          - Sid: PushOrderAppImages
+            Effect: Allow
+            Action:
+              - ecr:BatchCheckLayerAvailability
+              - ecr:BatchGetImage
+              - ecr:CompleteLayerUpload
+              - ecr:InitiateLayerUpload
+              - ecr:PutImage
+              - ecr:UploadLayerPart
+            Resource: !GetAtt Repository.Arn
+
+  GitHubPushRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "onward-${Environment}-delivery-github-push"
+      Description: Assumed by the app repository's GitHub Actions release workflow through OIDC.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !ImportValue onward-github-oidc-provider-arn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              # Only the main branch, or a build-* tag pushed by the deploy hook.
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${AppRepositorySubject}:ref:refs/heads/main"
+                  - !Sub "repo:${AppRepositorySubject}:ref:refs/tags/build-*"
+      ManagedPolicyArns: [!Ref GitHubPushPolicy]
+
+  # ---------------------------------------------------------------------------
+  # Nested stack templates
+  # ---------------------------------------------------------------------------
+  # One folder per template version, named after the content of infra/platform/stacks/
+  # (its Git tree hash), so a version never changes once published.
+  TemplateBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "onward-${Environment}-delivery-templates-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+
+  TemplatePublishPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "onward-${Environment}-delivery-templates-publish"
+      Description: Upload the platform's nested stack templates, nothing else.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ListTemplates
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !GetAtt TemplateBucket.Arn
+          - Sid: PublishTemplates
+            Effect: Allow
+            Action: [s3:GetObject, s3:PutObject]
+            Resource: !Sub "${TemplateBucket.Arn}/*"
+
+  TemplatePublishRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "onward-${Environment}-delivery-templates-publish"
+      Description: Assumed by this repository's publish-templates workflow through OIDC.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !ImportValue onward-github-oidc-provider-arn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub "repo:${InfraRepositorySubject}:ref:refs/heads/main"
+      ManagedPolicyArns: [!Ref TemplatePublishPolicy]
+
+Outputs:
+  RepositoryName:
+    Value: !Ref Repository
+    Export: { Name: !Sub "onward-${Environment}-delivery-repository-name" }
+  RepositoryUri:
+    Value: !GetAtt Repository.RepositoryUri
+    Export: { Name: !Sub "onward-${Environment}-delivery-repository-uri" }
+  TemplateBucketName:
+    Value: !Ref TemplateBucket
+    Export: { Name: !Sub "onward-${Environment}-delivery-template-bucket" }
+  GitHubPushRoleArn:
+    Value: !GetAtt GitHubPushRole.Arn
+  TemplatePublishRoleArn:
+    Value: !GetAtt TemplatePublishRole.Arn

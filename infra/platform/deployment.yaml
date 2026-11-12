@@ -1,0 +1,14 @@
+# Deployed by CloudFormation Git sync to stack onward-dev-delivery-platform (the root of the
+# nested network, security, service and pipeline stacks).
+# TemplatesVersion is written by .github/workflows/publish-templates.yml after it uploads
+# infra/platform/stacks/ to the template bucket: do not edit it by hand.
+template-file-path: infra/platform/template.yaml
+parameters:
+  Environment: dev
+  OwnerName: Gabriel Anyaele
+  ConnectionArn: arn:aws:codeconnections:eu-west-1:448049788660:connection/ec36b4c3-949e-47f7-95b0-4079a11b3703
+  TemplatesVersion: bc16dd2287aece309a89877d6a2bd1c5132b059a
+tags:
+  Project: onward
+  Owner: Gabriel Anyaele
+  Environment: dev

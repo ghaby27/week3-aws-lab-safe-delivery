@@ -5,7 +5,7 @@
 # Usage: scripts/watch.sh [url]   (defaults to the service stack's AppUrl output)
 set -uo pipefail
 export AWS_PROFILE=${AWS_PROFILE:-onward-logistics} AWS_REGION=${AWS_REGION:-eu-west-1}
-URL=${1:-$(aws cloudformation describe-stacks --stack-name onward-dev-delivery-service \
+URL=${1:-$(aws cloudformation describe-stacks --stack-name onward-dev-delivery-platform \
   --query "Stacks[0].Outputs[?OutputKey=='AppUrl'].OutputValue" --output text)}
 echo "Watching $URL/api/whoami (Ctrl+C to stop)"
 ok=0; failed=0

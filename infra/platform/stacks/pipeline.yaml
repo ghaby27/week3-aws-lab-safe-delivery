@@ -1,6 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  Pipeline layer for the safe delivery lab. A new "latest" image in ECR raises an
+  Pipeline stack (nested in the platform root) for the safe delivery lab. A new
+  "latest" image in ECR raises an
   event; an EventBridge rule starts CodePipeline; the pipeline takes the image and
   the app repository's deploy/ files and hands them to CodeDeploy, which releases
   the new version blue/green: start it beside the old one, move traffic once it is
@@ -15,6 +16,27 @@ Parameters:
   ConnectionArn:
     Type: String
     Description: CodeConnections connection used to read the app repository's deploy/ files.
+  RepositoryName:
+    Type: String
+    Description: ECR repository of the order app image (artifacts stack).
+  PipelineRoleArn:
+    Type: String
+  CodeDeployRoleArn:
+    Type: String
+  EventsRoleArn:
+    Type: String
+  ClusterName:
+    Type: String
+  ServiceName:
+    Type: String
+  ListenerArn:
+    Type: String
+  BlueTargetGroupName:
+    Type: String
+  GreenTargetGroupName:
+    Type: String
+  LoadBalancerFullName:
+    Type: String
   AppRepository:
     Type: String
     Default: ghaby27/aws-dev-associate-lab-app
@@ -61,7 +83,7 @@ Resources:
       MetricName: HTTPCode_Target_5XX_Count
       Dimensions:
         - Name: LoadBalancer
-          Value: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-alb-full-name" }
+          Value: !Ref LoadBalancerFullName
       Statistic: Sum
       Period: 60
       EvaluationPeriods: 1
@@ -80,7 +102,7 @@ Resources:
     Properties:
       ApplicationName: !Ref DeployApplication
       DeploymentGroupName: !Sub "onward-${Environment}-delivery-orders"
-      ServiceRoleArn: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-codedeploy-role-arn" }
+      ServiceRoleArn: !Ref CodeDeployRoleArn
       DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
       DeploymentStyle:
         DeploymentType: BLUE_GREEN
@@ -99,16 +121,16 @@ Resources:
         Enabled: true
         Alarms: [{ Name: !Ref ErrorAlarm }]
       ECSServices:
-        - ClusterName: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-cluster-name" }
-          ServiceName: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-service-name" }
+        - ClusterName: !Ref ClusterName
+          ServiceName: !Ref ServiceName
       LoadBalancerInfo:
         TargetGroupPairInfoList:
           - TargetGroups:
-              - Name: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-blue-tg-name" }
-              - Name: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-green-tg-name" }
+              - Name: !Ref BlueTargetGroupName
+              - Name: !Ref GreenTargetGroupName
             ProdTrafficRoute:
               ListenerArns:
-                - !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-listener-arn" }
+                - !Ref ListenerArn
 
   # ---------------------------------------------------------------------------
   # CodePipeline: collect the release, hand it to CodeDeploy
@@ -119,7 +141,7 @@ Resources:
       Name: !Sub "onward-${Environment}-delivery-orders"
       PipelineType: V2
       ExecutionMode: QUEUED
-      RoleArn: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-pipeline-role-arn" }
+      RoleArn: !Ref PipelineRoleArn
       ArtifactStore: { Type: S3, Location: !Ref ArtifactBucket }
       Stages:
         - Name: Source
@@ -127,7 +149,7 @@ Resources:
             - Name: Image
               ActionTypeId: { Category: Source, Owner: AWS, Provider: ECR, Version: "1" }
               Configuration:
-                RepositoryName: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-repository-name" }
+                RepositoryName: !Ref RepositoryName
                 ImageTag: !Ref ReleaseTag
               OutputArtifacts: [{ Name: Image }]
             # Read only when a release runs; changes to the app repo do not start the pipeline
@@ -171,12 +193,12 @@ Resources:
           action-type: [PUSH]
           result: [SUCCESS]
           repository-name:
-            - !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-repository-name" }
+            - !Ref RepositoryName
           image-tag: [!Ref ReleaseTag]
       Targets:
         - Id: pipeline
           Arn: !Sub "arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${Pipeline}"
-          RoleArn: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-events-role-arn" }
+          RoleArn: !Ref EventsRoleArn
 
 Outputs:
   PipelineName:

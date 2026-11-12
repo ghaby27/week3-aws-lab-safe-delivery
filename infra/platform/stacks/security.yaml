@@ -1,8 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  Security layer for the safe delivery lab: security groups (only the load
-  balancer is reachable from the internet) and the IAM roles each part of the
-  delivery uses. No inline policies: AWS managed policies where one fits, and
+  Security stack (nested in the platform root) for the safe delivery lab:
+  security groups (only the load balancer is reachable from the internet) and the
+  IAM roles each part of the delivery uses. The GitHub push role lives in the
+  artifacts stack, next to the repository it pushes to. No inline policies: AWS managed policies where one fits, and
   customer managed policies scoped to this lab's resources otherwise.
 
 Parameters:
@@ -10,13 +11,8 @@ Parameters:
     Type: String
     AllowedValues: [dev, test, prod]
     Default: dev
-  AppRepositorySubject:
-    Type: String
-    Default: ghaby27@332540436/aws-dev-associate-lab-app@1445229473
-    Description: >-
-      The app repository as GitHub writes it in the OIDC token subject: owner@owner-id/repo@repo-id.
-      The numeric IDs never change, so a deleted and re-created repository with the same name
-      cannot assume the role.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
   ConnectionArn:
     Type: String
     Description: CodeConnections connection the pipeline reads the app repo's deploy files through.
@@ -30,7 +26,9 @@ Resources:
     Properties:
       GroupName: !Sub "onward-${Environment}-delivery-alb-sg"
       GroupDescription: Public HTTP to the load balancer
-      VpcId: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-vpc-id" }
+      # Outbound keeps the default (all): the load balancer only ever opens connections to
+      # its registered targets, and the task security group admits only this group.
+      VpcId: !Ref VpcId
       SecurityGroupIngress:
         - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: customers }
       Tags: [{ Key: Name, Value: !Sub "onward-${Environment}-delivery-alb-sg" }]
@@ -40,7 +38,7 @@ Resources:
     Properties:
       GroupName: !Sub "onward-${Environment}-delivery-task-sg"
       GroupDescription: App port from the load balancer only; HTTPS out to the VPC endpoints
-      VpcId: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-vpc-id" }
+      VpcId: !Ref VpcId
       SecurityGroupIngress:
         - { IpProtocol: tcp, FromPort: 8080, ToPort: 8080, SourceSecurityGroupId: !Ref AlbSecurityGroup, Description: load balancer }
       # The private subnets have no route to the internet, so HTTPS out can only reach the
@@ -48,17 +46,6 @@ Resources:
       SecurityGroupEgress:
         - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: VPC endpoints only (no internet route) }
       Tags: [{ Key: Name, Value: !Sub "onward-${Environment}-delivery-task-sg" }]
-
-  # Load balancer may only talk to the tasks (replaces the default allow-all egress).
-  AlbToTasksEgress:
-    Type: AWS::EC2::SecurityGroupEgress
-    Properties:
-      GroupId: !Ref AlbSecurityGroup
-      IpProtocol: tcp
-      FromPort: 8080
-      ToPort: 8080
-      DestinationSecurityGroupId: !Ref TaskSecurityGroup
-      Description: forward to the tasks
 
   # ---------------------------------------------------------------------------
   # Runtime: the ECS agent pulls the image and writes logs
@@ -76,55 +63,6 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-
-  # ---------------------------------------------------------------------------
-  # Build: GitHub Actions pushes images, with short-lived OIDC credentials
-  # ---------------------------------------------------------------------------
-  GitHubPushPolicy:
-    Type: AWS::IAM::ManagedPolicy
-    Properties:
-      ManagedPolicyName: !Sub "onward-${Environment}-delivery-github-push"
-      Description: Push images to the order app ECR repository, nothing else.
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Sid: EcrLogin
-            Effect: Allow
-            Action: ecr:GetAuthorizationToken
-            Resource: "*"
-          - Sid: PushOrderAppImages
-            Effect: Allow
-            Action:
-              - ecr:BatchCheckLayerAvailability
-              - ecr:BatchGetImage
-              - ecr:CompleteLayerUpload
-              - ecr:InitiateLayerUpload
-              - ecr:PutImage
-              - ecr:UploadLayerPart
-            Resource: !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/onward-${Environment}-delivery-orders"
-
-  GitHubPushRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub "onward-${Environment}-delivery-github-push"
-      Description: Assumed by the app repository's GitHub Actions release workflow through OIDC.
-      MaxSessionDuration: 3600
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Federated: !ImportValue onward-github-oidc-provider-arn
-            Action: sts:AssumeRoleWithWebIdentity
-            Condition:
-              StringEquals:
-                token.actions.githubusercontent.com:aud: sts.amazonaws.com
-              # Only the main branch, or a build-* tag pushed by the deploy hook.
-              StringLike:
-                token.actions.githubusercontent.com:sub:
-                  - !Sub "repo:${AppRepositorySubject}:ref:refs/heads/main"
-                  - !Sub "repo:${AppRepositorySubject}:ref:refs/tags/build-*"
-      ManagedPolicyArns: [!Ref GitHubPushPolicy]
 
   # ---------------------------------------------------------------------------
   # Release: EventBridge starts the pipeline, the pipeline hands over to CodeDeploy
@@ -227,21 +165,13 @@ Resources:
 Outputs:
   AlbSecurityGroupId:
     Value: !Ref AlbSecurityGroup
-    Export: { Name: !Sub "onward-${Environment}-delivery-alb-sg-id" }
   TaskSecurityGroupId:
     Value: !Ref TaskSecurityGroup
-    Export: { Name: !Sub "onward-${Environment}-delivery-task-sg-id" }
   TaskExecutionRoleArn:
     Value: !GetAtt TaskExecutionRole.Arn
-    Export: { Name: !Sub "onward-${Environment}-delivery-task-execution-role-arn" }
-  GitHubPushRoleArn:
-    Value: !GetAtt GitHubPushRole.Arn
   EventsRoleArn:
     Value: !GetAtt EventsRole.Arn
-    Export: { Name: !Sub "onward-${Environment}-delivery-events-role-arn" }
   PipelineRoleArn:
     Value: !GetAtt PipelineRole.Arn
-    Export: { Name: !Sub "onward-${Environment}-delivery-pipeline-role-arn" }
   CodeDeployRoleArn:
     Value: !GetAtt CodeDeployRole.Arn
-    Export: { Name: !Sub "onward-${Environment}-delivery-codedeploy-role-arn" }

@@ -1,0 +1,94 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Root stack of the safe delivery lab platform. It holds no resources of its own:
+  it nests four stacks and wires each one's outputs into the next, so the order
+  and the connections between the parts are readable in one place.
+    network  -> VPC, subnets in two AZs, VPC endpoints (no NAT, no internet route)
+    security -> security groups and the IAM roles each part of the delivery uses
+    service  -> load balancer, blue/green target groups, ECS Fargate service, scaling
+    pipeline -> EventBridge rule, CodePipeline, CodeDeploy blue/green, error alarm
+  The nested templates live in infra/platform/stacks/. CloudFormation reads nested
+  templates from S3, so the publish-templates workflow uploads them to the template
+  bucket (artifacts stack) and sets TemplatesVersion in deployment.yaml; that
+  commit is what Git sync deploys.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+  TemplatesVersion:
+    Type: String
+    AllowedPattern: "^[0-9a-f]{40}$"
+    Description: Folder in the template bucket holding the nested templates (Git tree hash of infra/platform/stacks).
+  OwnerName:
+    Type: String
+    Description: Shown on the page.
+  ConnectionArn:
+    Type: String
+    Description: CodeConnections connection the pipeline reads the app repository's deploy files through.
+
+Resources:
+  Network:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub
+        - "https://${Bucket}.s3.${AWS::Region}.${AWS::URLSuffix}/${TemplatesVersion}/network.yaml"
+        - Bucket: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-template-bucket" }
+      Parameters:
+        Environment: !Ref Environment
+
+  Security:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub
+        - "https://${Bucket}.s3.${AWS::Region}.${AWS::URLSuffix}/${TemplatesVersion}/security.yaml"
+        - Bucket: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-template-bucket" }
+      Parameters:
+        Environment: !Ref Environment
+        VpcId: !GetAtt Network.Outputs.VpcId
+        ConnectionArn: !Ref ConnectionArn
+
+  Service:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub
+        - "https://${Bucket}.s3.${AWS::Region}.${AWS::URLSuffix}/${TemplatesVersion}/service.yaml"
+        - Bucket: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-template-bucket" }
+      Parameters:
+        Environment: !Ref Environment
+        OwnerName: !Ref OwnerName
+        VpcId: !GetAtt Network.Outputs.VpcId
+        PublicSubnetIds: !GetAtt Network.Outputs.PublicSubnetIds
+        PrivateSubnetIds: !GetAtt Network.Outputs.PrivateSubnetIds
+        AlbSecurityGroupId: !GetAtt Security.Outputs.AlbSecurityGroupId
+        TaskSecurityGroupId: !GetAtt Security.Outputs.TaskSecurityGroupId
+        TaskExecutionRoleArn: !GetAtt Security.Outputs.TaskExecutionRoleArn
+        RepositoryUri: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-repository-uri" }
+
+  Pipeline:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub
+        - "https://${Bucket}.s3.${AWS::Region}.${AWS::URLSuffix}/${TemplatesVersion}/pipeline.yaml"
+        - Bucket: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-template-bucket" }
+      Parameters:
+        Environment: !Ref Environment
+        ConnectionArn: !Ref ConnectionArn
+        RepositoryName: !ImportValue { "Fn::Sub": "onward-${Environment}-delivery-repository-name" }
+        PipelineRoleArn: !GetAtt Security.Outputs.PipelineRoleArn
+        CodeDeployRoleArn: !GetAtt Security.Outputs.CodeDeployRoleArn
+        EventsRoleArn: !GetAtt Security.Outputs.EventsRoleArn
+        ClusterName: !GetAtt Service.Outputs.ClusterName
+        ServiceName: !GetAtt Service.Outputs.ServiceName
+        ListenerArn: !GetAtt Service.Outputs.ListenerArn
+        BlueTargetGroupName: !GetAtt Service.Outputs.BlueTargetGroupName
+        GreenTargetGroupName: !GetAtt Service.Outputs.GreenTargetGroupName
+        LoadBalancerFullName: !GetAtt Service.Outputs.LoadBalancerFullName
+
+Outputs:
+  AppUrl:
+    Description: The single public address of the order system.
+    Value: !GetAtt Service.Outputs.AppUrl
+  PipelineUrl:
+    Value: !GetAtt Pipeline.Outputs.PipelineUrl
