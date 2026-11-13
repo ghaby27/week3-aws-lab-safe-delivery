@@ -76,5 +76,5 @@ With the three repositories cloned side by side:
 | No long-lived credentials | No access keys in either repository or in GitHub secrets; the workflow uses `role-to-assume` with OIDC |
 | Scales out and in | Press **Start a CPU spike** on the page (or run `scripts/cpu-load.sh`); tasks go from 1 up to 4 and back |
 | Survives a failed task or a lost AZ | Stop a task, or every task in one AZ: ECS replaces them without anyone acting. At the quiet-day size of one task, the site is down until the replacement is healthy (about a minute); with two or more tasks, the others keep serving |
-| Cost | `docs/discovery-report.docx` and the [Pricing Calculator estimate](https://calculator.aws/#/estimate?id=b1d86b5dda0bf641f0ad5213322ad99ccf352dba) (about USD 94 a month, half of it the VPC endpoints) |
+| Cost | `docs/discovery-report.docx` and the [Pricing Calculator estimate](https://calculator.aws/#/estimate?id=0a1f1eca6870d72350ea472b2933b5e5d900c65a) (about USD 85 a month, half of it the VPC endpoints) |
 | Rebuild from the repositories | `teardown.sh`, then `deploy.sh` |
